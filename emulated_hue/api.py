@@ -208,9 +208,11 @@ class HueApi:
         username = request.match_info["username"]
         entity = await self.config.async_entity_by_light_id(light_id)
         
-        response_data = request_data
-        if "config" in request_data.keys():
-            response_data = request_data["config"]
+        LOGGER.debug("Saving settings for light_id: %s - request_data: %s", light_id, request_data)
+        
+        response_data = request_data.get('config', request_data)
+        
+        LOGGER.debug("Parsed response_data: %s", response_data)
         
         config = await self.config.async_get_storage_value("light_config", light_id)
         if not config:
@@ -218,17 +220,24 @@ class HueApi:
                 "name": entity["attributes"].get('friendly_name', ""),
                 "archetype": "classicbulb",
             }
+            
+        LOGGER.debug("Current config: %s", config)
         
-        newconfig = {
-            "name": response_data.get('name', config.get('name', "")),
+        config.update({
+            "name": response_data.get('name', config.get('name', entity["attributes"].get('friendly_name', ""))),
             "archetype": response_data.get('archetype', config.get('archetype', "classicbulb"))
-        }
+        })
         
-        await self.config.async_set_storage_value("light_config", light_id, newconfig)
+        LOGGER.debug("New config: %s", config)
+        
+        await self.config.async_set_storage_value("light_config", light_id, config)
         
         response = await self.__async_create_hue_response(
             request.path, response_data, username
         )
+        
+        LOGGER.debug("hue response: %s",response)
+        
         return json_response_nonunicode(response)
 
     @routes.put("/api/{username}/lights/{light_id}/state")
@@ -722,7 +731,7 @@ class HueApi:
                 )
             if "name" in light_config and light_config["name"] is not None:
                 retval["name"] = light_config.get("name", entity["attributes"].get("friendly_name", ""))
-
+        
         return retval
 
     async def __async_create_hue_response(

@@ -80,7 +80,7 @@ def save_json(filename: str, data: dict):
     if os.path.isfile(filename):
         os.replace(filename, safe_copy)
     try:
-        json_data = json.dumps(data, sort_keys=True, indent=4)
+        json_data = json.dumps(data, sort_keys=True, indent=4, ensure_ascii=False)
         with open(filename, "w") as file_obj:
             file_obj.write(json_data)
     except IOError:
