@@ -247,6 +247,9 @@ class HueApi:
         light_id = request.match_info["light_id"]
         username = request.match_info["username"]
         entity = await self.config.async_entity_by_light_id(light_id)
+        
+        LOGGER.debug("light_id: %s - username: %s - request_data: %s", light_id, username, request_data)
+        
         await self.__async_light_action(entity, request_data)
         # Create success responses for all received keys
         response = await self.__async_create_hue_response(
@@ -276,9 +279,18 @@ class HueApi:
         """Handle requests to perform action on a group of lights/room."""
         group_id = request.match_info["group_id"]
         username = request.match_info["username"]
-        # forward request to all group lights
-        async for entity in self.__async_get_group_lights(group_id):
-            await self.__async_light_action(entity, request_data)
+        
+        LOGGER.debug("group_id: %s - username: %s - request_data: %s", group_id, username, request_data)
+        
+        if group_id == "0" and "scene" in request_data:
+             # this is a scene update request, forward to all lights in group.
+             LOGGER.debug("scene selected")
+             await self.__async_light_get_scene_value(request_data)
+        else:
+            # forward request to all group lights
+            async for entity in self.__async_get_group_lights(group_id):
+                await self.__async_light_action(entity, request_data)
+
         # Create success responses for all received keys
         response = await self.__async_create_hue_response(
             request.path, request_data, username
@@ -347,6 +359,7 @@ class HueApi:
         """Handle requests to retrieve localitems (e.g. scenes)."""
         itemtype = request.match_info["itemtype"]
         result = await self.config.async_get_storage_value(itemtype)
+        LOGGER.debug("async_get_localitems itemtype: %s - result: %s", itemtype, result)
         return json_response_nonunicode(result)
 
     @routes.get("/api/{username}/{itemtype:(?:scenes|rules|resourcelinks)}/{item_id}")
@@ -357,6 +370,7 @@ class HueApi:
         itemtype = request.match_info["itemtype"]
         items = await self.config.async_get_storage_value(itemtype)
         result = items.get(item_id, {})
+        LOGGER.debug("async_get_localitem itemtype: %s - item_id: %s - result: %s", itemtype, item_id, result)
         return json_response_nonunicode(result)
 
     @routes.post("/api/{username}/{itemtype:(?:scenes|rules|resourcelinks)}")
@@ -365,6 +379,7 @@ class HueApi:
         """Handle requests to create a new localitem."""
         itemtype = request.match_info["itemtype"]
         item_id = await self.__async_create_local_item(request_data, itemtype)
+        LOGGER.debug("async_create_localitem itemtype: %s - item_id: %s", itemtype, item_id)
         return json_response_nonunicode([{"success": {"id": item_id}}])
 
     @routes.put("/api/{username}/{itemtype:(?:scenes|rules|resourcelinks)}/{item_id}")
@@ -382,6 +397,7 @@ class HueApi:
         response = await self.__async_create_hue_response(
             request.path, request_data, username
         )
+        LOGGER.debug("async_create_localitem itemtype: %s - item_id: %s - username: %s - response: %s", itemtype, item_id, username, response)
         return json_response_nonunicode(response)
 
     @routes.delete(
@@ -557,7 +573,10 @@ class HueApi:
 
     async def __async_light_action(self, entity: dict, request_data: dict) -> None:
         """Translate the Hue api request data to actions on a light entity."""
-
+        
+        LOGGER.debug("__async_light_action entity %s", entity)
+        LOGGER.debug("__async_light_action request_data %s", request_data)
+        
         # Construct what we need to send to the service
         data = {const.HASS_ATTR_ENTITY_ID: entity["entity_id"]}
 
@@ -566,7 +585,6 @@ class HueApi:
             const.HASS_SERVICE_TURN_ON if power_on else const.HASS_SERVICE_TURN_OFF
         )
         if power_on:
-
             # set the brightness, hue, saturation and color temp
             if const.HUE_ATTR_BRI in request_data:
                 data[const.HASS_ATTR_BRIGHTNESS] = request_data[const.HUE_ATTR_BRI]
@@ -602,6 +620,20 @@ class HueApi:
 
         # execute service
         await self.hass.async_call_service(const.HASS_DOMAIN_LIGHT, service, data)
+
+    async def __async_light_get_scene_value(self, request_data: dict) -> None:
+        """Translate the Hue scene request data to actions on a light entity."""
+        if "scene" in request_data:
+            scenes = await self.config.async_get_storage_value("scenes")
+            result = scenes.get(request_data["scene"], {})
+            LOGGER.debug("result: %s", result)
+            
+            for light_id, lightstate in result.get("lightstates").items():
+                entity = await self.config.async_entity_by_light_id(light_id)
+                await self.__async_light_action(entity, lightstate)
+            
+                
+            #await self.hass.async_call_service(const.HASS_DOMAIN_LIGHT, service, data)
 
     async def __async_entity_to_hue(self, entity: dict) -> dict:
         """Convert an entity to its Hue bridge JSON representation."""
