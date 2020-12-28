@@ -210,12 +210,12 @@ class HueApi:
         config = await self.config.async_get_storage_value("light_config", light_id)
         if not config:
             config = {
-                #"name": entity["name"],
+                "name": entity["attributes"].get('friendly_name', ""),
                 "archetype": "classicbulb",
             }
         
         newconfig = {
-            #"name": response_data.get('name', config.get('name', "")),
+            "name": response_data.get('name', config.get('name', "")),
             "archetype": response_data.get('archetype', config.get('archetype', "classicbulb"))
         }
         
@@ -708,12 +708,15 @@ class HueApi:
         # Get configuration of light for HUE app
         light_id = await self.config.async_entity_id_to_light_id(entity["entity_id"])
         light_config = await self.config.async_get_storage_value("light_config", light_id)
-        if light_config and light_config["archetype"] is not None and retval["config"] is not None:
-            retval["config"].update(
-                {
-                    "archetype": light_config.get("archetype", "classicbulb")
-                }
-            )
+        if light_config and retval["config"] is not None:
+            if light_config["archetype"] is not None:
+                retval["config"].update(
+                    {
+                        "archetype": light_config.get("archetype", "classicbulb")
+                    }
+                )
+            if light_config["name"] is not None:
+                retval["name"] = light_config.get("name", entity["attributes"].get("friendly_name", ""))
 
         return retval
 

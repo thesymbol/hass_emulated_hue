@@ -47,7 +47,7 @@ if __name__ == "__main__":
         default=os.getenv("HASS_TOKEN", os.getenv("HASSIO_TOKEN")),
     )
     parser.add_argument(
-        "--disablehassrooms",
+        "--hassdisablerooms",
         type=bool,
         help="Disable importing of HASS areas/rooms",
         default=os.getenv("HASS_DISABLE_ROOMS", False)
@@ -63,11 +63,11 @@ if __name__ == "__main__":
     datapath = args.data
     url = args.url
     token = args.token
-    disablehassrooms = args.disablehassrooms
+    hassdisablerooms = args.hassdisablerooms
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
-    hue = HueEmulator(datapath, url, token, disablehassrooms)
+    hue = HueEmulator(datapath, url, token, hassdisablerooms)
 
     def on_shutdown(loop):
         """Call on loop shutdown."""
