@@ -185,12 +185,16 @@ class HueApi:
     async def async_get_new_lights(self, request: web.Request):
         """Handle requests to retrieve new added lights to the (virtual) bridge."""
         return web.json_response({})
-
+    
     @routes.get("/api/{username}/lights/{light_id}")
     @check_request
     async def async_get_light(self, request: web.Request):
         """Handle requests to retrieve the info for a single light."""
         light_id = request.match_info["light_id"]
+        
+        if light_id == "new": # sanity check if we hit this route it should not continue.
+            return web.json_response("{}")
+        
         entity = await self.config.async_entity_by_light_id(light_id)
         result = await self.__async_entity_to_hue(entity)
         return web.json_response(result)
@@ -715,7 +719,7 @@ class HueApi:
                         "archetype": light_config.get("archetype", "classicbulb")
                     }
                 )
-            if light_config["name"] is not None:
+            if "name" in light_config and light_config["name"] is not None:
                 retval["name"] = light_config.get("name", entity["attributes"].get("friendly_name", ""))
 
         return retval
