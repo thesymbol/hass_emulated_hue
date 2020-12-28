@@ -5,6 +5,7 @@ import os
 import socket
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from typing import Union
+from aiohttp import web
 
 import slugify as unicode_slug
 
@@ -57,6 +58,10 @@ def update_dict(dict1, dict2):
             update_dict(dict1[key], value)
         else:
             dict1[key] = value
+
+
+def json_response_nonunicode(data):
+    return web.Response(text=json.dumps(data, ensure_ascii=False), content_type='application/json')
 
 
 def load_json(filename: str):
