@@ -6,6 +6,7 @@ import inspect
 import logging
 import os
 import ssl
+import json
 from typing import Any, AsyncGenerator
 
 import emulated_hue.const as const
@@ -86,6 +87,7 @@ class HueApi:
         self.hue = hue
         self.http_site = None
         self.https_site = None
+        self.hass_disable_rooms = hue.hass_disable_rooms
         routes.add_class_routes(self)
 
     async def async_setup(self):
@@ -192,6 +194,37 @@ class HueApi:
         entity = await self.config.async_entity_by_light_id(light_id)
         result = await self.__async_entity_to_hue(entity)
         return web.json_response(result)
+        
+    @routes.put("/api/{username}/lights/{light_id}")
+    @check_request
+    async def async_put_light_config(self, request: web.Request, request_data: dict):
+        """Handle requests to save a single lights settings."""
+        light_id = request.match_info["light_id"]
+        username = request.match_info["username"]
+        entity = await self.config.async_entity_by_light_id(light_id)
+        
+        response_data = request_data
+        if "config" in request_data.keys():
+            response_data = request_data["config"]
+        
+        config = await self.config.async_get_storage_value("light_config", light_id)
+        if not config:
+            config = {
+                #"name": entity["name"],
+                "archetype": "classicbulb",
+            }
+        
+        newconfig = {
+            #"name": response_data.get('name', config.get('name', "")),
+            "archetype": response_data.get('archetype', config.get('archetype', "classicbulb"))
+        }
+        
+        await self.config.async_set_storage_value("light_config", light_id, newconfig)
+        
+        response = await self.__async_create_hue_response(
+            request.path, response_data, username
+        )
+        return web.json_response(response)
 
     @routes.put("/api/{username}/lights/{light_id}/state")
     @check_request
@@ -575,6 +608,7 @@ class HueApi:
 
         retval = {
             "state": {
+                "alert": "none",
                 const.HUE_ATTR_ON: entity["state"] == const.HASS_STATE_ON,
                 "reachable": entity["state"] != const.HASS_STATE_UNAVAILABLE,
                 "mode": "homeautomation",
@@ -585,6 +619,11 @@ class HueApi:
             "productname": "Emulated Hue",
             "modelid": entity["entity_id"],
             "swversion": "5.127.1.26581",
+            "config": {
+                "archetype": "classicbulb",
+                "function": "decorative",
+                "direction": "omnidirectional"
+            }
         }
 
         # get device type, model etc. from the Hass device registry
@@ -598,7 +637,7 @@ class HueApi:
                 retval["productname"] = device["name"]
                 if device["sw_version"]:
                     retval["swversion"] = device["sw_version"]
-
+                    
         if (
             (entity_features & const.HASS_SUPPORT_BRIGHTNESS)
             and (entity_features & const.HASS_SUPPORT_COLOR)
@@ -645,6 +684,7 @@ class HueApi:
             retval["type"] = "Color temperature light"
             retval["state"].update(
                 {
+                    const.HUE_ATTR_BRI: entity_attr.get(const.HASS_ATTR_BRIGHTNESS, 0),
                     const.HUE_ATTR_COLORMODE: "ct",
                     const.HUE_ATTR_CT: entity_attr.get(const.HASS_ATTR_COLOR_TEMP, 0),
                 }
@@ -664,6 +704,16 @@ class HueApi:
         adv_info = self.hue.config.definitions["lights"].get(retval["type"])
         if adv_info:
             retval.update(adv_info)
+            
+        # Get configuration of light for HUE app
+        light_id = await self.config.async_entity_id_to_light_id(entity["entity_id"])
+        light_config = await self.config.async_get_storage_value("light_config", light_id)
+        if light_config and light_config["archetype"] is not None and retval["config"] is not None:
+            retval["config"].update(
+                {
+                    "archetype": light_config.get("archetype", "classicbulb")
+                }
+            )
 
         return retval
 
@@ -713,36 +763,37 @@ class HueApi:
         result.update(local_groups)
 
         # Hass areas/rooms
-        for area in self.hass.area_registry.values():
-            area_id = area["area_id"]
-            group_id = await self.config.async_entity_id_to_light_id(area_id)
-            group_conf = result[group_id] = {
-                "class": "Other",
-                "type": "Room",
-                "name": area["name"],
-                "lights": [],
-                "sensors": [],
-                "action": {"on": False},
-                "state": {"any_on": False, "all_on": False},
-            }
-            lights_on = 0
-            # get all entities for this device
-            async for entity in self.__async_get_group_lights(group_id):
-                entity = self.hass.get_state(entity["entity_id"], attribute=None)
-                light_id = await self.config.async_entity_id_to_light_id(
-                    entity["entity_id"]
-                )
-                group_conf["lights"].append(light_id)
-                if entity["state"] == const.HASS_STATE_ON:
-                    lights_on += 1
-                    if lights_on == 1:
-                        # set state of first light as group state
-                        entity_obj = await self.__async_entity_to_hue(entity)
-                        group_conf["action"] = entity_obj["state"]
-            if lights_on > 0:
-                group_conf["state"]["any_on"] = True
-            if lights_on == len(group_conf["lights"]):
-                group_conf["state"]["all_on"] = True
+        if self.hass_disable_rooms is False:
+            for area in self.hass.area_registry.values():
+                area_id = area["area_id"]
+                group_id = await self.config.async_entity_id_to_light_id(area_id)
+                group_conf = result[group_id] = {
+                    "class": "Other",
+                    "type": "Room",
+                    "name": area["name"],
+                    "lights": [],
+                    "sensors": [],
+                    "action": {"on": False},
+                    "state": {"any_on": False, "all_on": False},
+                }
+                lights_on = 0
+                # get all entities for this device
+                async for entity in self.__async_get_group_lights(group_id):
+                    entity = self.hass.get_state(entity["entity_id"], attribute=None)
+                    light_id = await self.config.async_entity_id_to_light_id(
+                        entity["entity_id"]
+                    )
+                    group_conf["lights"].append(light_id)
+                    if entity["state"] == const.HASS_STATE_ON:
+                        lights_on += 1
+                        if lights_on == 1:
+                            # set state of first light as group state
+                            entity_obj = await self.__async_entity_to_hue(entity)
+                            group_conf["action"] = entity_obj["state"]
+                if lights_on > 0:
+                    group_conf["state"]["any_on"] = True
+                if lights_on == len(group_conf["lights"]):
+                    group_conf["state"]["all_on"] = True
 
         return result
 

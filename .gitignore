@@ -4,6 +4,8 @@ __pycache__
 .venv/
 *.code-workspace
 .idea
+*.whl
+data/
 
 config
 .devcontainer/docker-compose-pycharm.yml

@@ -25,7 +25,6 @@ HASS_STATE_ON = "on"
 HASS_STATE_UNAVAILABLE = "unavailable"
 HASS_DOMAIN_LIGHT = "light"
 
-
 # Hue API states
 HUE_ATTR_ON = "on"
 HUE_ATTR_BRI = "bri"

@@ -47,6 +47,12 @@ if __name__ == "__main__":
         default=os.getenv("HASS_TOKEN", os.getenv("HASSIO_TOKEN")),
     )
     parser.add_argument(
+        "--disablehassrooms",
+        type=bool,
+        help="Disable importing of HASS areas/rooms",
+        default=os.getenv("HASS_DISABLE_ROOMS", False)
+    )
+    parser.add_argument(
         "--verbose",
         type=bool,
         help="Enable more verbose logging",
@@ -57,10 +63,11 @@ if __name__ == "__main__":
     datapath = args.data
     url = args.url
     token = args.token
+    disablehassrooms = args.disablehassrooms
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
-    hue = HueEmulator(datapath, url, token)
+    hue = HueEmulator(datapath, url, token, disablehassrooms)
 
     def on_shutdown(loop):
         """Call on loop shutdown."""
