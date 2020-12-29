@@ -8,9 +8,9 @@ import os
 import ssl
 import json
 from typing import Any, AsyncGenerator
+from aiohttp import web
 
 import emulated_hue.const as const
-from aiohttp import web
 from emulated_hue.entertainment import EntertainmentAPI
 from emulated_hue.ssl_cert import async_generate_selfsigned_cert
 from emulated_hue.utils import update_dict
