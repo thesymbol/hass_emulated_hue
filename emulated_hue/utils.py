@@ -1,4 +1,5 @@
 """Emulated HUE Bridge for HomeAssistant - Helper utils."""
+import asyncio
 import json
 import logging
 import os
@@ -53,6 +54,8 @@ def slugify(text: str) -> str:
 
 def update_dict(dict1, dict2):
     """Helpermethod to update dict1 with values of dict2."""
+    LOGGER.debug("dict1: %s", dict1)
+    LOGGER.debug("dict2: %s", dict2)
     for key, value in dict2.items():
         if key in dict1 and isinstance(value, dict):
             update_dict(dict1[key], value)
@@ -65,7 +68,7 @@ def json_response_nonunicode(data):
     return web.Response(text=json.dumps(data, ensure_ascii=False), content_type='application/json')
 
 
-def load_json(filename: str):
+def load_json(filename: str) -> dict:
     """Load JSON from file."""
     try:
         with open(filename, encoding="utf-8") as fdesc:
@@ -73,6 +76,12 @@ def load_json(filename: str):
     except (FileNotFoundError, ValueError, OSError) as error:
         LOGGER.debug("Loading %s failed: %s", filename, error)
         return {}
+
+
+async def async_save_json(filename: str, data: dict):
+    """Save JSON data to a file."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, save_json, filename, data)
 
 
 def save_json(filename: str, data: dict):
