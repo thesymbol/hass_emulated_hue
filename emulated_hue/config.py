@@ -39,26 +39,42 @@ class Config:
         self._link_mode_discovery_key = None
 
         # Get the IP address that will be passed to during discovery
-        self.host_ip_addr = get_local_ip()
-        LOGGER.info("Auto detected listen IP address is %s", self.host_ip_addr)
+        self._ip_addr = get_local_ip()
+        LOGGER.info("Auto detected listen IP address is %s", self.ip_addr)
 
         # Get the ports that the Hue bridge will listen on
         # ports are currently hardcoded as Hue apps expect these ports
         self.http_port = 80
         self.https_port = 443
 
-        # Get whether or not UPNP binds to multicast address (239.255.255.250)
-        # or to the unicast address (host_ip_addr)
-        self.upnp_bind_multicast = True
-
-        mac_addr = str(get_mac_address(ip=self.host_ip_addr))
+        mac_addr = str(get_mac_address(ip=self.ip_addr))
         if not mac_addr or len(mac_addr) < 16:
             # fall back to dummy mac
             mac_addr = "b6:82:d3:45:ac:29"
-        self.mac_addr = mac_addr
-        self.mac_str = mac_addr.replace(":", "")
-        self.bridge_id = (self.mac_str[:6] + "FFFE" + self.mac_str[6:]).upper()
-        self.bridge_uid = f"2f402f80-da50-11e1-9b23-{self.mac_str}"
+        self._mac_addr = mac_addr
+        mac_str = mac_addr.replace(":", "")
+        self._bridge_id = (mac_str[:6] + "FFFE" + mac_str[6:]).upper()
+        self._bridge_uid = f"2f402f80-da50-11e1-9b23-{mac_str}"
+
+    @property
+    def ip_addr(self) -> str:
+        """Return ip address of the emulated bridge."""
+        return self._ip_addr
+
+    @property
+    def mac_addr(self) -> str:
+        """Return mac address of the emulated bridge."""
+        return self._mac_addr
+
+    @property
+    def bridge_id(self) -> str:
+        """Return the bridge id of the emulated bridge."""
+        return self._bridge_id
+
+    @property
+    def bridge_uid(self) -> str:
+        """Return the bridge UID of the emulated bridge."""
+        return self._bridge_uid
 
     @property
     def link_mode_enabled(self) -> bool:
@@ -69,6 +85,11 @@ class Config:
     def link_mode_discovery_key(self) -> Optional[str]:
         """Return the temporary token which enables linking."""
         return self._link_mode_discovery_key
+
+    @property
+    def bridge_name(self) -> str:
+        """Return the friendly name for the emulated bridge."""
+        return self.get_storage_value("bridge_config", "name", "Home Assistant")
 
     @property
     def definitions(self) -> dict:
@@ -82,7 +103,7 @@ class Config:
 
     async def async_entity_id_to_light_id(self, entity_id: str) -> str:
         """Get a unique light_id number for the hass entity id."""
-        lights = await self.async_get_storage_value("lights")
+        lights = await self.async_get_storage_value("lights", default={})
         for key, value in lights.items():
             if entity_id == value["entity_id"]:
                 return key
@@ -102,18 +123,19 @@ class Config:
             unique_id[12:14],
             unique_id[14:16],
         )
+        # create default light config
         light_config = {
             "entity_id": entity_id,
             "enabled": True,
             "name": "",
             "uniqueid": unique_id,
+            # TODO: detect type of light from hass device config ?
             "config": {
-                "archetype": "classicbulb",
-                "function": "decorative",
-                "direction": "omnidirectional"
+                "archetype": "sultanbulb",
+                "function": "mixed",
+                "direction": "omnidirectional",
             },
-            # TODO: set some sane throttle values based on the light model
-            "entertainment": {"throttle": 250, "transition": 500},
+            "entertainment_throttle": 0,
         }
         await self.async_set_storage_value("lights", next_light_id, light_config)
         return next_light_id
@@ -138,7 +160,7 @@ class Config:
 
     async def async_area_id_to_group_id(self, area_id: str) -> str:
         """Get a unique group_id number for the hass area_id."""
-        groups = await self.async_get_storage_value("groups")
+        groups = await self.async_get_storage_value("groups", default={})
         for key, value in groups.items():
             if area_id == value.get("area_id"):
                 return key
@@ -167,13 +189,21 @@ class Config:
             raise Exception(f"Group {group_id} not found!")
         return conf
 
-    async def async_get_storage_value(self, key: str, subkey: str = None) -> Any:
+    async def async_get_storage_value(
+        self, key: str, subkey: str = None, default: Optional[Any] = None
+    ) -> Any:
+        """Get a value from persistent storage."""
+        return self.get_storage_value(key, subkey, default)
+
+    def get_storage_value(
+        self, key: str, subkey: str = None, default: Optional[Any] = None
+    ) -> Any:
         """Get a value from persistent storage."""
         main_val = self._config.get(key, None)
         if main_val is None:
-            return {}
+            return default
         if subkey:
-            return main_val.get(subkey, None)
+            return main_val.get(subkey, default)
         return main_val
 
     async def async_set_storage_value(self, key: str, subkey: str, value: str) -> None:
@@ -217,9 +247,9 @@ class Config:
             self._config.pop(key)
         await async_save_json(self.get_path(CONFIG_FILE), self._config)
 
-    async def get_users(self) -> dict:
+    async def async_get_users(self) -> dict:
         """Get all registered users as dict."""
-        return await self.async_get_storage_value("users")
+        return await self.async_get_storage_value("users", default={})
 
     async def async_get_user(self, username: str) -> dict:
         """Get details for given username."""
@@ -229,7 +259,7 @@ class Config:
         """Create a new user for the api access."""
         if not self._link_mode_enabled:
             raise Exception("Link mode not enabled!")
-        all_users = await self.get_users()
+        all_users = await self.async_get_users()
         # devicetype is used as deviceid: <application_name>#<devicename>
         # return existing user if already registered
         for item in all_users.values():
@@ -252,32 +282,37 @@ class Config:
         await self.async_delete_storage_value("users", username)
 
     async def async_enable_link_mode(self) -> None:
-        """Enable link mode for the duration of 60 seconds."""
+        """Enable link mode for the duration of 5 minutes."""
         if self._link_mode_enabled:
             return  # already enabled
         self._link_mode_enabled = True
 
         def auto_disable():
-            self.hue.loop.create_task(self.disable_link_mode())
+            self.hue.loop.create_task(self.async_disable_link_mode())
 
-        self.hue.loop.call_later(60, auto_disable)
-        LOGGER.info("Link mode is enabled for the next 60 seconds.")
+        self.hue.loop.call_later(300, auto_disable)
+        LOGGER.info("Link mode is enabled for the next 5 minutes.")
 
-    async def disable_link_mode(self) -> None:
+    async def async_disable_link_mode(self) -> None:
         """Disable link mode on the virtual bridge."""
         self._link_mode_enabled = False
         LOGGER.info("Link mode is disabled.")
 
     async def async_enable_link_mode_discovery(self) -> None:
-        """Enable link mode discovery for the duration of 120 seconds."""
+        """Enable link mode discovery for the duration of 5 minutes."""
+
         if self._link_mode_discovery_key:
             return  # already active
+
+        LOGGER.info(
+            "Link request detected - Use the Homeassistant frontend to confirm this link request."
+        )
 
         self._link_mode_discovery_key = str(uuid.uuid4())
         # create persistent notification in hass
         # user can click the link in the notification to enable linking
 
-        url = f"http://{self.host_ip_addr}/link?token={self._link_mode_discovery_key}"
+        url = f"http://{self.ip_addr}/link/{self._link_mode_discovery_key}"
         msg = "Click the link below to enable pairing mode on the virtual bridge:\n\n"
         msg += f"**[Enable link mode]({url})**"
         msg_details = {
@@ -288,19 +323,18 @@ class Config:
         await self.hue.hass.async_call_service(
             "persistent_notification", "create", msg_details
         )
-        LOGGER.info(
-            "Link request detected - Use the Homeassistant frontend to confirm this link request."
-        )
-        # make sure that the notification and link request are dismissed after 120 seconds
+        # make sure that the notification and link request are dismissed after 5 minutes
 
         def auto_disable():
-            self._link_mode_discovery_key = None
-            self.hue.loop.create_task(
-                self.hue.hass.async_call_service(
-                    "persistent_notification",
-                    "dismiss",
-                    {"notification_id": "hue_bridge_link_requested"},
-                )
-            )
+            self.hue.loop.create_task(self.async_disable_link_mode_discovery())
 
-        self.hue.loop.call_later(120, auto_disable)
+        self.hue.loop.call_later(300, auto_disable)
+
+    async def async_disable_link_mode_discovery(self) -> None:
+        """Disable link mode discovery (remove notification in hass)."""
+        self._link_mode_discovery_key = None
+        await self.hue.hass.async_call_service(
+            "persistent_notification",
+            "dismiss",
+            {"notification_id": "hue_bridge_link_requested"},
+        )
