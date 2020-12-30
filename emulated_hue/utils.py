@@ -54,8 +54,6 @@ def slugify(text: str) -> str:
 
 def update_dict(dict1, dict2):
     """Helpermethod to update dict1 with values of dict2."""
-    LOGGER.debug("dict1: %s", dict1)
-    LOGGER.debug("dict2: %s", dict2)
     for key, value in dict2.items():
         if key in dict1 and isinstance(value, dict):
             update_dict(dict1[key], value)

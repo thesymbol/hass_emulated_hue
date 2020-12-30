@@ -747,7 +747,7 @@ class HueApi:
         # append advanced model info
         adv_info = self.hue.config.definitions["lights"].get(retval["type"])
         if adv_info:
-            retval.update(adv_info)
+            update_dict(retval, adv_info)
 
         return retval
 
