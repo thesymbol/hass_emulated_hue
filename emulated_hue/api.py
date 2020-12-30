@@ -591,6 +591,7 @@ class HueApi:
 
     async def __async_light_action(self, entity: dict, request_data: dict) -> None:
         """Translate the Hue api request data to actions on a light entity."""
+
         # Construct what we need to send to the service
         data = {const.HASS_ATTR_ENTITY_ID: entity["entity_id"]}
 
