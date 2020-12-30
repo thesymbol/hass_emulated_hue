@@ -4,8 +4,6 @@ __pycache__
 .venv/
 *.code-workspace
 .idea
-*.whl
-data/
 
 .run/Launch emulated_hue.run.xml
 

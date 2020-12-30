@@ -6,7 +6,6 @@ import os
 import socket
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from typing import Union
-from aiohttp import web
 
 import slugify as unicode_slug
 from aiohttp import web

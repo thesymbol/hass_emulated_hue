@@ -262,9 +262,6 @@ class HueApi:
         light_id = request.match_info["light_id"]
         username = request.match_info["username"]
         entity = await self.config.async_entity_by_light_id(light_id)
-        
-        LOGGER.debug("light_id: %s - username: %s - request_data: %s", light_id, username, request_data)
-        
         await self.__async_light_action(entity, request_data)
         # Create success responses for all received keys
         response = await self.__async_create_hue_response(
@@ -594,10 +591,6 @@ class HueApi:
 
     async def __async_light_action(self, entity: dict, request_data: dict) -> None:
         """Translate the Hue api request data to actions on a light entity."""
-        
-        LOGGER.debug("__async_light_action entity %s", entity)
-        LOGGER.debug("__async_light_action request_data %s", request_data)
-        
         # Construct what we need to send to the service
         data = {const.HASS_ATTR_ENTITY_ID: entity["entity_id"]}
 
@@ -606,6 +599,7 @@ class HueApi:
             const.HASS_SERVICE_TURN_ON if power_on else const.HASS_SERVICE_TURN_OFF
         )
         if power_on:
+
             # set the brightness, hue, saturation and color temp
             if const.HUE_ATTR_BRI in request_data:
                 data[const.HASS_ATTR_BRIGHTNESS] = request_data[const.HUE_ATTR_BRI]
@@ -685,7 +679,7 @@ class HueApi:
                 retval["productname"] = device["name"]
                 if device["sw_version"]:
                     retval["swversion"] = device["sw_version"]
-                    
+
         if (
             (entity_features & const.HASS_SUPPORT_BRIGHTNESS)
             and (entity_features & const.HASS_SUPPORT_COLOR)
