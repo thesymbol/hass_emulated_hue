@@ -618,6 +618,7 @@ class HueApi:
         # Construct what we need to send to the service
         data = {const.HASS_ATTR_ENTITY_ID: entity["entity_id"]}
 
+        requires_transition = False
         power_on = request_data.get(const.HASS_STATE_ON, True)
         service = (
             const.HASS_SERVICE_TURN_ON if power_on else const.HASS_SERVICE_TURN_OFF
@@ -627,6 +628,7 @@ class HueApi:
             # set the brightness, hue, saturation and color temp
             if const.HUE_ATTR_BRI in request_data:
                 data[const.HASS_ATTR_BRIGHTNESS] = request_data[const.HUE_ATTR_BRI]
+                requires_transition = True
 
             if const.HUE_ATTR_HUE in request_data or const.HUE_ATTR_SAT in request_data:
                 hue = request_data.get(const.HUE_ATTR_HUE, 0)
@@ -635,29 +637,35 @@ class HueApi:
                 hue = int((hue / const.HUE_ATTR_HUE_MAX) * 360)
                 sat = int((sat / const.HUE_ATTR_SAT_MAX) * 100)
                 data[const.HASS_ATTR_HS_COLOR] = (hue, sat)
+                requires_transition = True
 
             if const.HUE_ATTR_CT in request_data:
                 data[const.HASS_ATTR_COLOR_TEMP] = request_data[const.HUE_ATTR_CT]
+                requires_transition = True
 
             if const.HUE_ATTR_XY in request_data:
                 data[const.HASS_ATTR_XY_COLOR] = request_data[const.HUE_ATTR_XY]
+                requires_transition = True
 
             if const.HUE_ATTR_EFFECT in request_data:
                 data[const.HASS_ATTR_EFFECT] = request_data[const.HUE_ATTR_EFFECT]
+                requires_transition = True
 
             if const.HUE_ATTR_ALERT in request_data:
                 if request_data[const.HUE_ATTR_ALERT] == "select":
                     data[const.HASS_ATTR_FLASH] = "short"
                 elif request_data[const.HUE_ATTR_ALERT] == "lselect":
                     data[const.HASS_ATTR_FLASH] = "long"
+                requires_transition = True
 
-        if const.HUE_ATTR_TRANSITION in request_data:
-            # Duration of the transition from the light to the new state
-            # is given as a multiple of 100ms and defaults to 4 (400ms).
-            transitiontime = request_data[const.HUE_ATTR_TRANSITION] / 100
-            data[const.HASS_ATTR_TRANSITION] = transitiontime
-        else:
-            data[const.HASS_ATTR_TRANSITION] = 0.4
+        if requires_transition:
+            if const.HUE_ATTR_TRANSITION in request_data:
+                # Duration of the transition from the light to the new state
+                # is given as a multiple of 100ms and defaults to 4 (400ms).
+                transitiontime = request_data[const.HUE_ATTR_TRANSITION] / 100
+                data[const.HASS_ATTR_TRANSITION] = transitiontime
+            else:
+                data[const.HASS_ATTR_TRANSITION] = 0.4
 
         # execute service
         await self.hass.async_call_service(const.HASS_DOMAIN_LIGHT, service, data)
@@ -781,9 +789,7 @@ class HueApi:
         json_response = []
         for key, val in request_data.items():
             obj_path = f"{request_path}/{key}"
-            if "/groups/0" in obj_path:
-                item = {"success": {obj_path: val}}
-            elif "/groups" in obj_path:
+            if "/groups" in obj_path and "/groups/0/" not in obj_path:
                 item = {"success": {"address": obj_path, "value": val}}
             else:
                 item = {"success": {obj_path: val}}
