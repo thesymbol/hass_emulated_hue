@@ -1,5 +1,4 @@
 """Support for a Hue API to control Home Assistant."""
-import asyncio
 import datetime
 import functools
 import inspect
@@ -13,12 +12,16 @@ from aiohttp import web
 import emulated_hue.const as const
 from emulated_hue.entertainment import EntertainmentAPI
 from emulated_hue.ssl_cert import async_generate_selfsigned_cert
-from emulated_hue.utils import send_json_response, update_dict
+from emulated_hue.utils import send_json_response, send_error_response, update_dict
 
 LOGGER = logging.getLogger(__name__)
 
 DESCRIPTION_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "description.xml"
+)
+
+CLIP_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "clip.html"
 )
 
 
@@ -49,6 +52,9 @@ class ClassRouteTableDef(web.RouteTableDef):
         for _, handler in inspect.getmembers(instance, predicate):
             method, path, kwargs = handler.route_info
             super().route(method, path, **kwargs)(handler)
+            # also add the route with trailing slash,
+            # the hue apps seem to be a bit inconsistent about that
+            super().route(method, path + "/", **kwargs)(handler)
 
 
 # pylint: disable=invalid-name
@@ -68,7 +74,7 @@ def check_request(check_user=True, log_request=True):
             if check_user:
                 username = request.match_info.get("username")
                 if not username or not await cls.config.async_get_user(username):
-                    return send_json_response(const.HUE_UNAUTHORIZED_USER)
+                    return send_error_response(request.path, "unauthorized user", 1)
             # check and unpack (json) body if needed
             if request.method in ["PUT", "POST"]:
                 try:
@@ -102,13 +108,25 @@ class HueApi:
         with open(DESCRIPTION_FILE, encoding="utf-8") as fdesc:
             self._description_xml = fdesc.read()
 
+        with open(CLIP_FILE, encoding="utf-8") as fdesc:
+            self._clip_html = fdesc.read()
+
     async def async_setup(self):
         """Async set-up of the webserver."""
         app = web.Application()
+        # add config routes
+        app.router.add_route(
+            "GET", "/api/{username}/config", self.async_get_bridge_config
+        )
+        app.router.add_route("GET", "/api/config", self.async_get_bridge_config)
+        app.router.add_route(
+            "GET", "/api/{username}/config/", self.async_get_bridge_config
+        )
+        app.router.add_route("GET", "/api/config/", self.async_get_bridge_config)
         # add all routes defined with decorator
         routes.add_class_routes(self)
         app.add_routes(routes)
-        # Add catch-all handler for unkown requests
+        # Add catch-all handler for unknown requests
         app.router.add_route("*", "/{tail:.*}", self.async_unknown_request)
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
@@ -156,7 +174,7 @@ class HueApi:
         if self.streaming_api:
             self.streaming_api.stop()
 
-    @routes.post("/api{tail:/?}")
+    @routes.post("/api")
     @check_request(False)
     async def async_post_auth(self, request: web.Request, request_data: dict):
         """Handle requests to create a username for the emulated hue bridge."""
@@ -165,21 +183,7 @@ class HueApi:
             return send_json_response(("Devicetype not specified", 302))
         if not self.config.link_mode_enabled:
             await self.config.async_enable_link_mode_discovery()
-            # wait max 30 seconds for link mode to be enabled
-            count = 0
-            while not self.config.link_mode_enabled and count < 60:
-                count += 1
-                await asyncio.sleep(0.5)
-        if not self.config.link_mode_enabled:
-            return send_json_response(
-                {
-                    "error": {
-                        "address": "/",
-                        "description": "link button not pressed",
-                        "type": 101,
-                    }
-                }
-            )
+            return send_error_response(request.path, "link button not pressed", 101)
 
         userdetails = await self.config.async_create_user(request_data["devicetype"])
         response = [{"success": {"username": userdetails["username"]}}]
@@ -436,11 +440,10 @@ class HueApi:
         result = [{"success": f"/{itemtype}/{item_id} deleted."}]
         return send_json_response(result)
 
-    @routes.get("/api/{username:.*}config")
     @check_request(False)
     async def async_get_bridge_config(self, request: web.Request):
-        """Process a request to get the (full) config of this emulated bridge."""
-        username = request.match_info["username"].replace("/", "")
+        """Process a request to get (full or partial) config of this emulated bridge."""
+        username = request.match_info.get("username")
         valid_user = True
         if not username or not await self.config.async_get_user(username):
             valid_user = False
@@ -521,7 +524,7 @@ class HueApi:
             self.config.ip_addr,
             self.config.http_port,
             self.config.bridge_name,
-            self.config.bridge_id,
+            self.config.bridge_serial,
             self.config.bridge_uid,
         )
         return web.Response(text=resp_text, content_type="text/xml")
@@ -577,6 +580,19 @@ class HueApi:
         """Return all timezones."""
         return send_json_response(self.config.definitions["timezones"])
 
+    # Static Content Begin
+    @routes.get("/clip.html")
+    @check_request(False)
+    async def async_get_clip_debugger(self, request: web.Request):
+        """Serve the CLIP Debugger."""
+        return web.Response(text=self._clip_html, content_type="text/html")
+
+    @routes.get("/robots.txt")
+    @check_request(False)
+    async def async_get_robots_txt(self, request: web.Request):
+        """Serve robots.txt."""
+        return web.Response(text=const.ROBOTS_TXT, content_type="text/plain")
+
     async def async_unknown_request(self, request: web.Request):
         """Handle unknown requests (catch-all)."""
         if request.method in ["PUT", "POST"]:
@@ -588,6 +604,7 @@ class HueApi:
         else:
             LOGGER.warning("Invalid/unknown request: %s", request)
         return web.Response(status=404)
+
 
     async def __async_light_action(self, entity: dict, request_data: dict) -> None:
         """Translate the Hue api request data to actions on a light entity."""

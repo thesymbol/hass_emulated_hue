@@ -48,6 +48,4 @@ HUE_ATTR_SAT_MAX = 254
 HUE_ATTR_CT_MIN = 153  # Color temp
 HUE_ATTR_CT_MAX = 500
 
-HUE_UNAUTHORIZED_USER = [
-    {"error": {"address": "/", "description": "unauthorized user", "type": "1"}}
-]
+ROBOTS_TXT = "User-agent: *\nDisallow: /"
