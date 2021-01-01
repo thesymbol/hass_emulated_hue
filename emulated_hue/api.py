@@ -303,6 +303,12 @@ class HueApi:
             for light_id, light_state in scene["lightstates"].items():
                 entity = await self.config.async_entity_by_light_id(light_id)
                 await self.__async_light_action(entity, light_state)
+        elif group_id == "0":
+            # group_id = 0 means send to all groups
+            groups = await self.config.async_get_storage_value("groups", default={})
+            for group_id, group_conf in groups.items():
+                async for entity in self.__async_get_group_lights(group_id):
+                    await self.__async_light_action(entity, request_data)
         else:
             # forward request to all group lights
             async for entity in self.__async_get_group_lights(group_id):
@@ -775,7 +781,9 @@ class HueApi:
         json_response = []
         for key, val in request_data.items():
             obj_path = f"{request_path}/{key}"
-            if "/groups" in obj_path:
+            if "/groups/0" in obj_path:
+                item = {"success": {obj_path: val}}
+            elif "/groups" in obj_path:
                 item = {"success": {"address": obj_path, "value": val}}
             else:
                 item = {"success": {obj_path: val}}
