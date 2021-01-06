@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import ssl
+import time
 from typing import Any, AsyncGenerator, Optional
 from aiohttp import web
 
@@ -377,6 +378,25 @@ class HueApi:
         if not light_conf:
             return web.Response(status=404)
         update_dict(light_conf, request_data)
+        
+        entity = await self.config.async_entity_by_light_id(light_id)
+        reg_entity = self.hass.entity_registry.get(entity["entity_id"])
+        if reg_entity and reg_entity["device_id"] is not None:
+            device = self.hass.device_registry.get(reg_entity["device_id"])
+            if device:
+                light_conf["manufacturername"] = device["manufacturer"]
+                light_conf["modelid"] = device["model"]
+                light_conf["productname"] = device["name"]
+                if device["sw_version"]:
+                    light_conf["swversion"] = device["sw_version"]
+                if device["identifiers"]:
+                    # prefer real zigbee address if we have that
+                    # might come in handy later when we want to
+                    # send entertainment packets to the zigbee mesh
+                    for key, value in device["identifiers"]:
+                        if key == "zha":
+                            light_conf["uniqueid"] = value
+
         await self.config.async_set_storage_value("lights", light_id, light_conf)
         return send_success_response(request.path, request_data, username)
 
@@ -648,9 +668,26 @@ class HueApi:
                 data[const.HASS_ATTR_TRANSITION] = transitiontime
             else:
                 data[const.HASS_ATTR_TRANSITION] = 0.4
-
-        # execute service
-        await self.hass.async_call_service(const.HASS_DOMAIN_LIGHT, service, data)
+        
+        light_id = await self.config.async_entity_id_to_light_id(
+            entity["entity_id"]
+        )
+        light_config = await self.config.async_get_light_config(light_id)
+        if "manufacturername" in light_config and light_config["manufacturername"] == "IKEA of Sweden" and (const.HASS_ATTR_BRIGHTNESS in data and (const.HASS_ATTR_COLOR_TEMP in data or const.HASS_ATTR_XY_COLOR in data or const.HASS_ATTR_HS_COLOR in data)):
+            tmp_brightness = data[const.HASS_ATTR_BRIGHTNESS]
+            ikea_data = dict(data)
+            del ikea_data[const.HASS_ATTR_BRIGHTNESS]
+            ikea_bri_data = {
+                const.HASS_ATTR_ENTITY_ID: entity["entity_id"],
+                const.HASS_ATTR_BRIGHTNESS: tmp_brightness,
+                const.HASS_ATTR_TRANSITION: 0
+            }
+            await self.hass.async_call_service(const.HASS_DOMAIN_LIGHT, service, ikea_bri_data)
+            time.sleep(0.05) # needed to let the lights do its brightness transition in time.
+            await self.hass.async_call_service(const.HASS_DOMAIN_LIGHT, service, ikea_data)
+        else:
+            # execute service
+            await self.hass.async_call_service(const.HASS_DOMAIN_LIGHT, service, data)
 
     async def __async_entity_to_hue(
         self, entity: dict, light_config: Optional[dict] = None
@@ -677,6 +714,7 @@ class HueApi:
             "name": light_config["name"]
             or entity["attributes"].get("friendly_name", ""),
             "uniqueid": light_config["uniqueid"],
+            "config": light_config["config"]
         }
 
         # Determine correct Hue type from HA supported features

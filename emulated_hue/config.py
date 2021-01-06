@@ -144,6 +144,11 @@ class Config:
                 "direction": "omnidirectional",
             },
             "entertainment_throttle": 0,
+            "manufacturername": "",
+            "modelid": "",
+            "productname": "",
+            "swversion": "",
+            "uniqueid": ""
         }
         await self.async_set_storage_value("lights", next_light_id, light_config)
         return next_light_id
