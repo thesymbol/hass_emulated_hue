@@ -4,9 +4,8 @@ Convert your Home Assistant instance to a fully functional Philips HUE bridge!
 Control all lights connected to your Home Assistant box with HUE compatible apps/devices like the official Hue app, Hue essentials and Philips Ambilight+Hue etc.
 
 ## Features
-- Rooms will be auto created based on areas created in Home Assistant.
-- All lights will be supported with full functionality.
-- For now only support for light entities as it's primary use case is to give you HUE control over your HASS lights.
+- Your Areas in Home Assistant will be auto created as rooms in the HUE app.
+- All your Home Assistant lights will be supported with full functionality.
 - Allow you to create your own HUE groups and scenes.
 - Secured connection and authentication flow (unlike default emulated hue component in hass).
 - Fully emulates a "V2" HUE bridge.
@@ -18,9 +17,9 @@ Control all lights connected to your Home Assistant box with HUE compatible apps
 - You've replaced the Official HUE bridge with ZHA/zigbee2mqtt and you miss some original HUE features.
 - You'd like to sync your lights with your TV/game (e.g. HUE Sync, Ambilight+HUE).
 
-## How ro run/install/use this thing ?
+## How to run/install/use this thing ?
 - Add the custom repository to the Home Assistant supervisor's add-on store: 
-  https://github.com/marcelveldt/hassio-addons-repo
+  https://github.com/hass-emulated-hue/hassio-repo
 - Install the Emulated HUE addon from the addon-store
 - Start the newly installed addon and it will work instantly
 
@@ -52,4 +51,42 @@ The next step we have in mind is, if you own official HUE lights connected to ZH
 - Support for routines / automations ?
 
 Please use the Github issue tracker for feature requests (including motivation) and off course for reporting any issues you may find!
+
+
+## FAQ
+
+
+#### I do not want to have all my Home Assistant lights imported to HUE
+By default all your Home Assistant lights and areas will be imported to get you started quickly but you can customize this.
+In your Home Assistant config directory you'll find a folder for emulated_hue witha file called emulated_hue.json.
+In that file you can disable lights or groups by setting enabled to false.
+You can also delete a light in the HUE app. That will also mark the light as disabled.
+
+
+
+#### When I enable Entertainment mode my light/platform gets overwhelmed with commands
+
+Entertainment mode is heavy. It will send multiple commands per second to each light. If you hardware can't cope up with this we have an advanced little setting hidden in the above mentioned emulated_hue.json config file called "entertainment_throttle". Set a value (in milliseconds) to throttle requests to this light. A good value to start with is 500. Remember to stop the addon before you start editing this file.
+
+
+
+#### I run Home Assistant manually without all the supervisor stuff, can I still run this thing ?
+Sure, just run the docker image manually. We'll provide you with some sample run commands soon.
+
+
+#### How does this thing differ from the existing solution diyHue ?
+
+diyHue was created to be a hub on it's own. You can directly connect your lights and devices to it and it. You can see it as a minimal competitor for Home automation solutions like Home Assistant. Our approach is that we want to use Home Assistant as the "hub" connected to all our lights and devices. This emulator is just a translator between Home Assistant and the HUE api protocol and does not have any internal logic. 
+
+
+#### How does this thing differ from the default emulated hue component in Home Assistant ?
+The emulated Hue component in Home Assistant is a very basic implemention of the HUE API for the V1 HUE bridge which is soon to be discontinued by Philips. At that time it was meant to get Alexa/Google Home devices working with Home Assistant. In the meanwhile other solutions are available for that so the component is more or less absolute.
+
+
+#### Why is this an addon and not a Home Assistant integration
+Well this project actually started as integration, but we ran into some serious trouble:
+1) HUE requires the HUB to be on HTTP port 80 and HTTPS port 443
+2) The entertainment mode executable is not working with the Alpine docker image from Home Assistant.
+
+The current approach gives you the flexibility of running the emulated HUE bridge on a diferent machine than HA.
 

@@ -1,4 +1,5 @@
 """Support for a Hue API to control Home Assistant."""
+import copy
 import datetime
 import functools
 import inspect
@@ -8,11 +9,12 @@ import os
 import ssl
 import time
 from typing import Any, AsyncGenerator, Optional
-from aiohttp import web
 
 import emulated_hue.const as const
+import tzlocal
+from aiohttp import web
 from emulated_hue.entertainment import EntertainmentAPI
-from emulated_hue.ssl_cert import async_generate_selfsigned_cert
+from emulated_hue.ssl_cert import async_generate_selfsigned_cert, check_certificate
 from emulated_hue.utils import (
     send_error_response,
     send_json_response,
@@ -22,11 +24,8 @@ from emulated_hue.utils import (
 
 LOGGER = logging.getLogger(__name__)
 
-DESCRIPTION_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "description.xml"
-)
-
-CLIP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clip.html")
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_static")
+DESCRIPTION_FILE = os.path.join(STATIC_DIR, "description.xml")
 
 
 class ClassRouteTableDef(web.RouteTableDef):
@@ -112,9 +111,6 @@ class HueApi:
         with open(DESCRIPTION_FILE, encoding="utf-8") as fdesc:
             self._description_xml = fdesc.read()
 
-        with open(CLIP_FILE, encoding="utf-8") as fdesc:
-            self._clip_html = fdesc.read()
-
     async def async_setup(self):
         """Async set-up of the webserver."""
         app = web.Application()
@@ -130,8 +126,10 @@ class HueApi:
         # add all routes defined with decorator
         routes.add_class_routes(self)
         app.add_routes(routes)
-        # Add catch-all handler for unknown requests
-        app.router.add_route("*", "/{tail:.*}", self.async_unknown_request)
+        # Add catch-all handler for unknown requests to api
+        app.router.add_route("*", "/api/{tail:.*}", self.async_unknown_request)
+        # static files hosting
+        app.router.add_static("/", STATIC_DIR, append_version=True)
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
 
@@ -151,7 +149,7 @@ class HueApi:
         # create self signed certificate for HTTPS API
         cert_file = self.config.get_path(".cert.pem")
         key_file = self.config.get_path(".cert_key.pem")
-        if not os.path.isfile(cert_file) or not os.path.isfile(key_file):
+        if not check_certificate(cert_file, self.config):
             await async_generate_selfsigned_cert(cert_file, key_file, self.config)
         ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         ssl_context.load_cert_chain(cert_file, key_file)
@@ -198,7 +196,7 @@ class HueApi:
         return send_json_response(response)
 
     @routes.get("/api/{username}/lights")
-    @check_request(log_request=False)
+    @check_request()
     async def async_get_lights(self, request: web.Request):
         """Handle requests to retrieve the info all lights."""
         return send_json_response(await self.__async_get_all_lights())
@@ -273,7 +271,7 @@ class HueApi:
         return send_success_response(request.path, request_data, username)
 
     @routes.get("/api/{username}/groups")
-    @check_request(log_request=False)
+    @check_request()
     async def async_get_groups(self, request: web.Request):
         """Handle requests to retrieve all rooms/groups."""
         groups = await self.__async_get_all_groups()
@@ -409,7 +407,7 @@ class HueApi:
         return send_json_response(result)
 
     @routes.get("/api/{username}/{itemtype:(?:scenes|rules|resourcelinks)}/{item_id}")
-    @check_request(log_request=False)
+    @check_request()
     async def async_get_localitem(self, request: web.Request):
         """Handle requests to retrieve info for a single localitem."""
         item_id = request.match_info["item_id"]
@@ -452,7 +450,7 @@ class HueApi:
         result = [{"success": f"/{itemtype}/{item_id} deleted."}]
         return send_json_response(result)
 
-    @check_request(check_user=False, log_request=False)
+    @check_request(check_user=False)
     async def async_get_bridge_config(self, request: web.Request):
         """Process a request to get (full or partial) config of this emulated bridge."""
         username = request.match_info.get("username")
@@ -472,8 +470,22 @@ class HueApi:
         # just log this request and return succes
         LOGGER.debug("Change config called with params: %s", request_data)
         for key, value in request_data.items():
-            await self.config.async_set_storage_value("bridge_config", key, value)
+            if key == "linkbutton" and value and not self.config.link_mode_enabled:
+                await self.config.async_enable_link_mode()
+            else:
+                await self.config.async_set_storage_value("bridge_config", key, value)
         return send_success_response(request.path, request_data, username)
+
+    async def async_scene_to_full_state(self) -> dict:
+        """Return scene data, removing lightstates and adds group lights instead."""
+        groups = await self.__async_get_all_groups()
+        scenes = await self.config.async_get_storage_value("scenes", default={})
+        scenes = copy.deepcopy(scenes)
+        for scene_num, scene_data in scenes.items():
+            scenes_group = scene_data["group"]
+            del scene_data["lightstates"]
+            scene_data["lights"] = groups[scenes_group]["lights"]
+        return scenes
 
     @routes.get("/api/{username}")
     @check_request()
@@ -485,7 +497,7 @@ class HueApi:
                 "schedules", default={}
             ),
             "rules": await self.config.async_get_storage_value("rules", default={}),
-            "scenes": await self.config.async_get_storage_value("scenes", default={}),
+            "scenes": await self.async_scene_to_full_state(),
             "resourcelinks": await self.config.async_get_storage_value(
                 "resourcelinks", default={}
             ),
@@ -512,7 +524,7 @@ class HueApi:
         return send_json_response(json_response)
 
     @routes.get("/api/{username}/sensors")
-    @check_request(log_request=False)
+    @check_request()
     async def async_get_sensors(self, request: web.Request):
         """Return sensors on the (virtual) bridge."""
         # not supported yet but prevent errors
@@ -589,19 +601,6 @@ class HueApi:
         """Return all timezones."""
         return send_json_response(self.config.definitions["timezones"])
 
-    # Static Content Begin
-    @routes.get("/clip.html")
-    @check_request(False)
-    async def async_get_clip_debugger(self, request: web.Request):
-        """Serve the CLIP Debugger."""
-        return web.Response(text=self._clip_html, content_type="text/html")
-
-    @routes.get("/robots.txt")
-    @check_request(False)
-    async def async_get_robots_txt(self, request: web.Request):
-        """Serve robots.txt."""
-        return web.Response(text=const.ROBOTS_TXT, content_type="text/plain")
-
     async def async_unknown_request(self, request: web.Request):
         """Handle unknown requests (catch-all)."""
         if request.method in ["PUT", "POST"]:
@@ -664,7 +663,7 @@ class HueApi:
             if const.HUE_ATTR_TRANSITION in request_data:
                 # Duration of the transition from the light to the new state
                 # is given as a multiple of 100ms and defaults to 4 (400ms).
-                transitiontime = request_data[const.HUE_ATTR_TRANSITION] / 100
+                transitiontime = request_data[const.HUE_ATTR_TRANSITION] / 10
                 data[const.HASS_ATTR_TRANSITION] = transitiontime
             else:
                 data[const.HASS_ATTR_TRANSITION] = 0.4
@@ -707,13 +706,16 @@ class HueApi:
             "state": {
                 "alert": "none",
                 const.HUE_ATTR_ON: entity["state"] == const.HASS_STATE_ON,
-                "alert": "none",
                 "reachable": entity["state"] != const.HASS_STATE_UNAVAILABLE,
                 "mode": "homeautomation",
             },
             "name": light_config["name"]
             or entity["attributes"].get("friendly_name", ""),
             "uniqueid": light_config["uniqueid"],
+            "swupdate": {
+                "state": "noupdates",
+                "lastinstall": datetime.datetime.utcnow().isoformat().split(".")[0],
+            },
             "config": light_config["config"]
         }
 
@@ -740,10 +742,17 @@ class HueApi:
                     const.HUE_ATTR_XY: entity_attr.get(
                         const.HASS_ATTR_XY_COLOR, [0, 0]
                     ),
+                    const.HUE_ATTR_HUE: entity_attr.get(
+                        const.HASS_ATTR_HS_COLOR, [0, 0]
+                    )[0],
+                    const.HUE_ATTR_SAT: entity_attr.get(
+                        const.HASS_ATTR_HS_COLOR, [0, 0]
+                    )[1],
                     const.HUE_ATTR_CT: entity_attr.get(const.HASS_ATTR_COLOR_TEMP, 0),
                     const.HUE_ATTR_EFFECT: entity_attr.get(
                         const.HASS_ATTR_EFFECT, "none"
                     ),
+                    const.HUE_ATTR_ALERT: "none",
                 }
             )
         elif (entity_features & const.HASS_SUPPORT_BRIGHTNESS) and (
@@ -759,6 +768,12 @@ class HueApi:
                     const.HUE_ATTR_XY: entity_attr.get(
                         const.HASS_ATTR_XY_COLOR, [0, 0]
                     ),
+                    const.HUE_ATTR_HUE: entity_attr.get(
+                        const.HASS_ATTR_HS_COLOR, [0, 0]
+                    )[0],
+                    const.HUE_ATTR_SAT: entity_attr.get(
+                        const.HASS_ATTR_HS_COLOR, [0, 0]
+                    )[1],
                     const.HUE_ATTR_EFFECT: "none",
                 }
             )
@@ -879,6 +894,9 @@ class HueApi:
                     result[group_id]["state"]["any_on"] = True
                 if lights_on == len(result[group_id]["lights"]):
                     result[group_id]["state"]["all_on"] = True
+                # do not return empty areas/rooms
+                if len(result[group_id]["lights"]) == 0:
+                    result.pop(group_id, None)
 
         return result
 
@@ -892,23 +910,36 @@ class HueApi:
 
         # Hass group (area)
         if "area_id" in group_conf:
-            for device in self.hass.device_registry.values():
-                if device["area_id"] != group_conf["area_id"]:
+            for entity in self.hass.entity_registry.values():
+                if entity["disabled_by"]:
+                    # do not include disabled devices
                     continue
-                # get all entities for this device
-                for entity in self.hass.entity_registry.values():
-                    if entity["device_id"] != device["id"] or entity["disabled_by"]:
-                        continue
-                    if not entity["entity_id"].startswith("light."):
-                        continue
-                    light_id = await self.config.async_entity_id_to_light_id(
-                        entity["entity_id"]
-                    )
-                    light_conf = await self.config.async_get_light_config(light_id)
-                    if not light_conf["enabled"]:
-                        continue
-                    entity = self.hass.get_state(entity["entity_id"], attribute=None)
-                    yield entity
+                if not entity["entity_id"].startswith("light."):
+                    # for now only include lights
+                    # TODO: include switches, sensors ?
+                    continue
+                device = self.hass.device_registry.get(entity["device_id"])
+                # first check if area is defined on entity itself
+                if entity["area_id"] and entity["area_id"] != group_conf["area_id"]:
+                    # different area id defined on entity so skip this entity
+                    continue
+                elif entity["area_id"] == group_conf["area_id"]:
+                    # our area_id is configured on the entity, use it
+                    pass
+                elif device and device["area_id"] == group_conf["area_id"]:
+                    # our area_id is configured on the entity's device, use it
+                    pass
+                else:
+                    continue
+                # process the light entity
+                light_id = await self.config.async_entity_id_to_light_id(
+                    entity["entity_id"]
+                )
+                light_conf = await self.config.async_get_light_config(light_id)
+                if not light_conf["enabled"]:
+                    continue
+                entity = self.hass.get_state(entity["entity_id"], attribute=None)
+                yield entity
 
         # Local group
         else:
@@ -936,7 +967,7 @@ class HueApi:
                     "UTC": datetime.datetime.utcnow().isoformat().split(".")[0],
                     "localtime": datetime.datetime.now().isoformat().split(".")[0],
                     "timezone": self.config.get_storage_value(
-                        "bridge_config", "timezone", "Europe/Amsterdam"
+                        "bridge_config", "timezone", tzlocal.get_localzone().zone
                     ),
                     "whitelist": await self.config.async_get_storage_value(
                         "users", default={}

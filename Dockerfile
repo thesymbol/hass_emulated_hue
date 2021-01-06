@@ -1,56 +1,36 @@
-FROM python:3.8-slim as builder
+# syntax=docker/dockerfile:experimental
+ARG BUILD_VERSION
 
-ENV PIP_EXTRA_INDEX_URL=https://www.piwheels.org/simple
+#####################################################################
+#                                                                   #
+# Download and extract rootfs                                       #
+#                                                                   #
+#####################################################################
+FROM alpine:latest as s6-base-downloader
+WORKDIR /base
 
-COPY requirements.txt /tmp/requirements.txt
+RUN wget -O /tmp/base.tar.gz "https://github.com/hass-emulated-hue/s6-overlay-base/archive/master.tar.gz" \
+    && mkdir -p /tmp/base \
+    && tar zxvf /tmp/base.tar.gz --strip 1 -C /tmp/base \
+    && mv /tmp/base/* .
 
-RUN set -x \
-    # Install buildtime packages
-    && apt-get update && apt-get install -y --no-install-recommends \
-        curl \
-        ca-certificates \
-        build-essential \
-        gcc \
-        libffi-dev \
-        libssl-dev
+#####################################################################
+#                                                                   #
+# Final Image                                                       #
+#                                                                   #
+#####################################################################
+FROM ghcr.io/hass-emulated-hue/base-image
+# Required to presist build arg
+ARG BUILD_VERSION
 
-# build python wheels
-WORKDIR /wheels
-RUN pip wheel uvloop cchardet aiodns brotlipy \
-    && pip wheel -r /tmp/requirements.txt
-    
-#### FINAL IMAGE
-FROM python:3.8-slim AS final-image
+# Copy root filesystem
+COPY --from=s6-base-downloader /base/rootfs/ /
+# Copy app
+COPY emulated_hue emulated_hue
 
-WORKDIR /wheels
-COPY --from=builder /wheels /wheels
-COPY . /app
-RUN set -x \
-    # Install runtime dependency packages
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        curl \
-        tzdata \
-        ca-certificates \
-        openssl \
-    # install prebuilt wheels
-    && pip install --no-cache-dir -f /wheels -r /app/requirements.txt \
-    # cleanup
-    && rm -rf /tmp/* \
-    && rm -rf /wheels \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -rf /root/*
-
-WORKDIR /app
+LABEL io.hass.version=${BUILD_VERSION}
 
 ENV DEBUG=false
 ENV VERBOSE=false
 ENV HASS_URL=""
 ENV HASS_TOKEN=""
-
-EXPOSE 80/tcp
-EXPOSE 443/tcp
-
-VOLUME [ "/data" ]
-
-ENTRYPOINT ["python3", "-m", "emulated_hue", "--data", "/data"]
