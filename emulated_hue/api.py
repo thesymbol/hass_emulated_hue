@@ -16,6 +16,7 @@ from aiohttp import web
 from emulated_hue.entertainment import EntertainmentAPI
 from emulated_hue.ssl_cert import async_generate_selfsigned_cert, check_certificate
 from emulated_hue.utils import (
+    entity_attributes_to_int,
     send_error_response,
     send_json_response,
     send_success_response,
@@ -108,6 +109,8 @@ class HueApi:
         self.https_site = None
         self.hass_disable_rooms = hue.hass_disable_rooms
         self._new_lights = {}
+        self._timestamps = {}
+        self._prev_data = {}
         with open(DESCRIPTION_FILE, encoding="utf-8") as fdesc:
             self._description_xml = fdesc.read()
 
@@ -292,6 +295,7 @@ class HueApi:
         """Handle requests to perform action on a group of lights/room."""
         group_id = request.match_info["group_id"]
         username = request.match_info["username"]
+        group_conf = await self.config.async_get_storage_value("groups", group_id)
         if group_id == "0" and "scene" in request_data:
             # scene request
             scene = await self.config.async_get_storage_value(
@@ -310,6 +314,18 @@ class HueApi:
             # forward request to all group lights
             async for entity in self.__async_get_group_lights(group_id):
                 await self.__async_light_action(entity, request_data)
+        if "stream" in group_conf:
+            # Request streaming stop
+            # Duplicate code here. Method instead?
+            LOGGER.info(
+                "Stop Entertainment mode for group %s - params: %s",
+                group_id,
+                request_data,
+            )
+            if self.streaming_api:
+                # stop service if needed
+                self.streaming_api.stop()
+                self.streaming_api = None
         # Create success responses for all received keys
         return send_success_response(request.path, request_data, username)
 
@@ -328,7 +344,7 @@ class HueApi:
         username = request.match_info["username"]
         group_conf = await self.config.async_get_storage_value("groups", group_id)
         if not group_conf:
-            return web.Response(status=404)
+            return send_error_response(request.path, "no group config", 404)
         update_dict(group_conf, request_data)
 
         # Hue entertainment support (experimental)
@@ -340,6 +356,7 @@ class HueApi:
                     group_id,
                     request_data,
                 )
+                del group_conf["stream"]["active"]
                 if not self.streaming_api:
                     user_data = await self.config.async_get_user(username)
                     self.streaming_api = EntertainmentAPI(
@@ -357,7 +374,6 @@ class HueApi:
                     group_id,
                     request_data,
                 )
-                group_conf["stream"] = {"active": False}
                 if self.streaming_api:
                     # stop service if needed
                     self.streaming_api.stop()
@@ -374,7 +390,7 @@ class HueApi:
         username = request.match_info["username"]
         light_conf = await self.config.async_get_storage_value("lights", light_id)
         if not light_conf:
-            return web.Response(status=404)
+            return send_error_response(request.path, "no light config", 404)
         update_dict(light_conf, request_data)
         
         entity = await self.config.async_entity_by_light_id(light_id)
@@ -433,7 +449,7 @@ class HueApi:
         username = request.match_info["username"]
         local_item = await self.config.async_get_storage_value(itemtype, item_id)
         if not local_item:
-            return web.Response(status=404)
+            return send_error_response(request.path, "no localitem", 404)
         update_dict(local_item, request_data)
         await self.config.async_set_storage_value(itemtype, item_id, local_item)
         return send_success_response(request.path, request_data, username)
@@ -470,8 +486,10 @@ class HueApi:
         # just log this request and return succes
         LOGGER.debug("Change config called with params: %s", request_data)
         for key, value in request_data.items():
-            if key == "linkbutton" and value and not self.config.link_mode_enabled:
-                await self.config.async_enable_link_mode()
+            if key == "linkbutton" and value:
+                # prevent storing value in config
+                if not self.config.link_mode_enabled:
+                    await self.config.async_enable_link_mode()
             else:
                 await self.config.async_set_storage_value("bridge_config", key, value)
         return send_success_response(request.path, request_data, username)
@@ -515,7 +533,7 @@ class HueApi:
                     "name": "Daylight",
                     "type": "Daylight",
                     "modelid": "PHDL00",
-                    "manufacturername": "Philips",
+                    "manufacturername": "Signify Netherlands B.V.",
                     "swversion": "1.0",
                 }
             },
@@ -544,7 +562,7 @@ class HueApi:
         resp_text = self._description_xml.format(
             self.config.ip_addr,
             self.config.http_port,
-            self.config.bridge_name,
+            f"{self.config.bridge_name} ({self.config.ip_addr})",
             self.config.bridge_serial,
             self.config.bridge_uid,
         )
@@ -611,16 +629,27 @@ class HueApi:
             LOGGER.warning("Invalid/unknown request: %s --> %s", request, request_data)
         else:
             LOGGER.warning("Invalid/unknown request: %s", request)
-        return web.Response(status=404)
+        return send_error_response(request.path, "unknown request", 404)
 
     async def __async_light_action(self, entity: dict, request_data: dict) -> None:
         """Translate the Hue api request data to actions on a light entity."""
+
+        light_id = await self.config.async_entity_id_to_light_id(entity["entity_id"])
+        light_conf = await self.config.async_get_light_config(light_id)
+        throttle_ms = light_conf.get("throttle", const.DEFAULT_THROTTLE_MS)
 
         # Construct what we need to send to the service
         data = {const.HASS_ATTR_ENTITY_ID: entity["entity_id"]}
 
         requires_transition = False
         power_on = request_data.get(const.HASS_STATE_ON, True)
+
+        # throttle command to light
+        data_with_power = request_data.copy()
+        data_with_power[const.HASS_STATE_ON] = power_on
+        if not self.__update_allowed(light_id, data_with_power, throttle_ms):
+            return
+
         service = (
             const.HASS_SERVICE_TURN_ON if power_on else const.HASS_SERVICE_TURN_OFF
         )
@@ -628,7 +657,11 @@ class HueApi:
 
             # set the brightness, hue, saturation and color temp
             if const.HUE_ATTR_BRI in request_data:
-                data[const.HASS_ATTR_BRIGHTNESS] = request_data[const.HUE_ATTR_BRI]
+                # Prevent 0 brightness from turning light off
+                request_bri = request_data[const.HUE_ATTR_BRI]
+                if request_bri < const.HASS_ATTR_BRI_MIN:
+                    request_bri = const.HASS_ATTR_BRI_MIN
+                data[const.HASS_ATTR_BRIGHTNESS] = request_bri
                 requires_transition = True
 
             if const.HUE_ATTR_HUE in request_data or const.HUE_ATTR_SAT in request_data:
@@ -663,10 +696,15 @@ class HueApi:
             if const.HUE_ATTR_TRANSITION in request_data:
                 # Duration of the transition from the light to the new state
                 # is given as a multiple of 100ms and defaults to 4 (400ms).
-                transitiontime = request_data[const.HUE_ATTR_TRANSITION] / 10
-                data[const.HASS_ATTR_TRANSITION] = transitiontime
+                if request_data[const.HUE_ATTR_TRANSITION] * 100 <= throttle_ms:
+                    transitiontime = throttle_ms / 1000
+                else:
+                    transitiontime = request_data[const.HUE_ATTR_TRANSITION] / 10
+                    data[const.HASS_ATTR_TRANSITION] = transitiontime
             else:
-                data[const.HASS_ATTR_TRANSITION] = 0.4
+                data[const.HASS_ATTR_TRANSITION] = (
+                    0.4 if throttle_ms <= 400 else throttle_ms / 1000
+                )
         
         light_id = await self.config.async_entity_id_to_light_id(
             entity["entity_id"]
@@ -688,11 +726,54 @@ class HueApi:
             # execute service
             await self.hass.async_call_service(const.HASS_DOMAIN_LIGHT, service, data)
 
+    def __update_allowed(
+        self, light_id: str, light_data: dict, throttle_ms: int
+    ) -> bool:
+        """Minimalistic form of throttling, only allow updates to a light within a timespan."""
+
+        prev_data = self._prev_data.get(light_id, {})
+
+        # force to update if power state changed
+        if prev_data.get(const.HASS_STATE_ON, True) != light_data.get(
+            const.HASS_STATE_ON, True
+        ):
+            return True
+        # check if data changed
+        # when not using udp no need to send same light command again
+        if (
+            prev_data.get(const.HUE_ATTR_BRI, 0)
+            == light_data.get(const.HUE_ATTR_BRI, 0)
+            and prev_data.get(const.HUE_ATTR_HUE, 0)
+            == light_data.get(const.HUE_ATTR_HUE, 0)
+            and prev_data.get(const.HUE_ATTR_SAT, 0)
+            == light_data.get(const.HUE_ATTR_SAT, 0)
+            and prev_data.get(const.HUE_ATTR_CT, 0)
+            == light_data.get(const.HUE_ATTR_CT, 0)
+            and prev_data.get(const.HUE_ATTR_XY, [0, 0])
+            == light_data.get(const.HUE_ATTR_XY, [0, 0])
+        ):
+            return False
+
+        self._prev_data[light_id] = light_data.copy()
+
+        # check throttle timestamp so light commands are only sent once every X milliseconds
+        # this is to not overload a light implementation in Home Assistant
+        if not throttle_ms:
+            return True
+        prev_timestamp = self._timestamps.get(light_id, 0)
+        cur_timestamp = int(time.time() * 1000)
+        time_diff = abs(cur_timestamp - prev_timestamp)
+        if time_diff >= throttle_ms:
+            # change allowed only if within throttle limit
+            self._timestamps[light_id] = cur_timestamp
+            return True
+        return False
+
     async def __async_entity_to_hue(
         self, entity: dict, light_config: Optional[dict] = None
     ) -> dict:
         """Convert an entity to its Hue bridge JSON representation."""
-        entity_attr = entity["attributes"]
+        entity_attr = entity_attributes_to_int(entity["attributes"])
         entity_features = entity["attributes"].get(
             const.HASS_ATTR_SUPPORTED_FEATURES, 0
         )
@@ -716,7 +797,7 @@ class HueApi:
                 "state": "noupdates",
                 "lastinstall": datetime.datetime.utcnow().isoformat().split(".")[0],
             },
-            "config": light_config["config"]
+            "config": light_config["config"],
         }
 
         # Determine correct Hue type from HA supported features
@@ -821,12 +902,24 @@ class HueApi:
                 if device["sw_version"]:
                     retval["swversion"] = device["sw_version"]
                 if device["identifiers"]:
-                    # prefer real zigbee address if we have that
-                    # might come in handy later when we want to
-                    # send entertainment packets to the zigbee mesh
-                    for key, value in device["identifiers"]:
-                        if key == "zha":
-                            retval["uniqueid"] = value
+                    identifiers = device["identifiers"]
+                    if isinstance(identifiers, dict):
+                        # prefer real zigbee address if we have that
+                        # might come in handy later when we want to
+                        # send entertainment packets to the zigbee mesh
+                        for key, value in device["identifiers"]:
+                            if key == "zha":
+                                retval["uniqueid"] = value
+                    elif isinstance(identifiers, list):
+                        # simply grab the first available identifier for now
+                        # may inprove this in the future
+                        for identifier in identifiers:
+                            if isinstance(identifier, list):
+                                retval["uniqueid"] = identifier[-1]
+                                break
+                            elif isinstance(identifier, str):
+                                retval["uniqueid"] = identifier
+                                break
 
         return retval
 
@@ -852,6 +945,8 @@ class HueApi:
             item_id = str(i)
             if item_id not in local_items:
                 break
+        if data["type"] in ["LightGroup", "Room", "Zone"] and "class" not in data:
+            data["class"] = "Other"
         await self.config.async_set_storage_value(itemtype, item_id, data)
         return item_id
 
@@ -862,7 +957,14 @@ class HueApi:
         # local groups first
         groups = await self.config.async_get_storage_value("groups", default={})
         for group_id, group_conf in groups.items():
+            # no area_id = not hass area
             if "area_id" not in group_conf:
+                if "stream" in group_conf:
+                    group_conf = copy.deepcopy(group_conf)
+                    if self.streaming_api:
+                        group_conf["stream"]["active"] = True
+                    else:
+                        group_conf["stream"]["active"] = False
                 result[group_id] = group_conf
 
         # Hass areas/rooms
@@ -947,6 +1049,14 @@ class HueApi:
                 entity = await self.config.async_entity_by_light_id(light_id)
                 yield entity
 
+    async def __async_whitelist_to_bridge_config(self) -> dict:
+        whitelist = await self.config.async_get_storage_value("users", default={})
+        whitelist = copy.deepcopy(whitelist)
+        for username, data in whitelist.items():
+            del data["username"]
+            del data["clientkey"]
+        return whitelist
+
     async def __async_get_bridge_config(self, full_details: bool = False) -> dict:
         """Return the (virtual) bridge configuration."""
         result = self.hue.config.definitions.get("bridge").get("basic").copy()
@@ -955,13 +1065,13 @@ class HueApi:
                 "name": self.config.bridge_name,
                 "mac": self.config.mac_addr,
                 "bridgeid": self.config.bridge_id,
-                "linkbutton": self.config.link_mode_enabled,
             }
         )
         if full_details:
             result.update(self.hue.config.definitions.get("bridge").get("full"))
             result.update(
                 {
+                    "linkbutton": self.config.link_mode_enabled,
                     "ipaddress": self.config.ip_addr,
                     "gateway": self.config.ip_addr,
                     "UTC": datetime.datetime.utcnow().isoformat().split(".")[0],
@@ -969,9 +1079,7 @@ class HueApi:
                     "timezone": self.config.get_storage_value(
                         "bridge_config", "timezone", tzlocal.get_localzone().zone
                     ),
-                    "whitelist": await self.config.async_get_storage_value(
-                        "users", default={}
-                    ),
+                    "whitelist": await self.__async_whitelist_to_bridge_config(),
                     "zigbeechannel": self.config.get_storage_value(
                         "bridge_config", "zigbeechannel", 25
                     ),

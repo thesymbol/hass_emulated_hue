@@ -5,11 +5,18 @@ import logging
 import os
 import time
 
+from emulated_hue.const import (
+    DEFAULT_THROTTLE_MS,
+    HASS_ATTR_BRIGHTNESS,
+    HASS_ATTR_RGB_COLOR,
+    HASS_ATTR_TRANSITION,
+    HASS_ATTR_XY_COLOR,
+)
+
 LOGGER = logging.getLogger(__name__)
 
 COLOR_TYPE_RGB = "RGB"
 COLOR_TYPE_XY_BR = "XY Brightness"
-DEFAULT_THROTTLE_MS = 0
 
 
 if os.path.isfile("/usr/local/opt/openssl@1.1/bin/openssl"):
@@ -98,30 +105,35 @@ class EntertainmentAPI:
         # TODO: can we send udp messages to supported lights such as esphome ?
         # For now we simply unpack the entertainment packet and forward
         # individual commands to lights by calling hass services.
-        throttle_ms = light_conf.get("entertainment_throttle", DEFAULT_THROTTLE_MS)
+        throttle_ms = light_conf.get("throttle", DEFAULT_THROTTLE_MS)
         if not self.__update_allowed(light_id, light_data, throttle_ms):
             return
 
         entity_id = light_conf["entity_id"]
         svc_data = {"entity_id": entity_id}
         if color_space == COLOR_TYPE_RGB:
-            svc_data["rgb_color"] = [
+            svc_data[HASS_ATTR_RGB_COLOR] = [
                 int((light_data[3] * 256 + light_data[4]) / 256),
                 int((light_data[5] * 256 + light_data[6]) / 256),
                 int((light_data[7] * 256 + light_data[8]) / 256),
             ]
+            svc_data[HASS_ATTR_BRIGHTNESS] = sum(svc_data[HASS_ATTR_RGB_COLOR]) / len(
+                svc_data[HASS_ATTR_RGB_COLOR]
+            )
         else:
-            svc_data["xy_color"] = [
+            svc_data[HASS_ATTR_XY_COLOR] = [
                 float((light_data[3] * 256 + light_data[4]) / 65535),
                 float((light_data[5] * 256 + light_data[6]) / 65535),
             ]
-            svc_data["brightness"] = int((light_data[7] * 256 + light_data[8]) / 256)
+            svc_data[HASS_ATTR_BRIGHTNESS] = int(
+                (light_data[7] * 256 + light_data[8]) / 256
+            )
 
         # update allowed within throttling, push to light
         if throttle_ms:
-            svc_data["transition"] = throttle_ms / 1000
+            svc_data[HASS_ATTR_TRANSITION] = throttle_ms / 1000
         else:
-            svc_data["transition"] = 0
+            svc_data[HASS_ATTR_TRANSITION] = 0
         await self.hass.async_call_service("light", "turn_on", svc_data)
         self.hass.states[entity_id]["attributes"].update(svc_data)
 
@@ -142,8 +154,7 @@ class EntertainmentAPI:
             return True
         prev_timestamp = self._timestamps.get(light_id, 0)
         cur_timestamp = int(time.time() * 1000)
-        time_diff = abs(cur_timestamp - prev_timestamp)
-        if time_diff >= throttle_ms:
+        if (cur_timestamp - prev_timestamp) >= throttle_ms:
             # change allowed only if within throttle limit
             self._timestamps[light_id] = cur_timestamp
             return True

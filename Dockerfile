@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:experimental
 ARG BUILD_VERSION
 
 #####################################################################
@@ -20,7 +19,7 @@ RUN wget -O /tmp/base.tar.gz "https://github.com/hass-emulated-hue/s6-overlay-ba
 #                                                                   #
 #####################################################################
 FROM ghcr.io/hass-emulated-hue/base-image
-# Required to presist build arg
+# Required to persist build arg
 ARG BUILD_VERSION
 
 # Copy root filesystem
@@ -29,8 +28,3 @@ COPY --from=s6-base-downloader /base/rootfs/ /
 COPY emulated_hue emulated_hue
 
 LABEL io.hass.version=${BUILD_VERSION}
-
-ENV DEBUG=false
-ENV VERBOSE=false
-ENV HASS_URL=""
-ENV HASS_TOKEN=""

@@ -1,9 +1,12 @@
 """Emulated HUE Bridge for HomeAssistant - constants."""
 
+DEFAULT_THROTTLE_MS = 0
+
 HASS_ATTR_BRIGHTNESS = "brightness"
 HASS_ATTR_COLOR_TEMP = "color_temp"
 HASS_ATTR_XY_COLOR = "xy_color"
 HASS_ATTR_HS_COLOR = "hs_color"
+HASS_ATTR_RGB_COLOR = "rgb_color"
 HASS_ATTR_EFFECT = "effect"
 HASS_ATTR_TRANSITION = "transition"
 HASS_ATTR_FLASH = "flash"
@@ -25,6 +28,7 @@ HASS_STATE_ON = "on"
 HASS_STATE_UNAVAILABLE = "unavailable"
 HASS_DOMAIN_LIGHT = "light"
 
+HASS_ATTR_BRI_MIN = 1  # Brightness
 
 # Hue API states
 HUE_ATTR_ON = "on"
