@@ -21,12 +21,15 @@ CONFIG_FILE = "emulated_hue.json"
 DEFINITIONS_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "definitions.json"
 )
+DEFAULT_THROTTLE_MS = 0
 
 
 class Config:
     """Hold configuration variables for the emulated hue bridge."""
 
-    def __init__(self, hue: HueEmulator, data_path: str):
+    def __init__(
+        self, hue: HueEmulator, data_path: str, http_port: int, https_port: int
+    ):
         """Initialize the instance."""
         self.hue = hue
         self.data_path = data_path
@@ -42,9 +45,14 @@ class Config:
         LOGGER.info("Auto detected listen IP address is %s", self.ip_addr)
 
         # Get the ports that the Hue bridge will listen on
-        # ports are currently hardcoded as Hue apps expect these ports
-        self.http_port = 80
-        self.https_port = 443
+        # ports can be overridden but Hue apps expect ports 80/443
+        # so this is only usefull when running a reverse proxy on the same host
+        self.http_port = http_port
+        self.https_port = https_port
+        if http_port != 80 or https_port != 443:
+            LOGGER.warning(
+                "Non default http/https ports detected. Hue apps require the bridge at the default ports 80/443, use at your own risk."
+            )
 
         mac_addr = str(get_mac_address(ip=self.ip_addr))
         if not mac_addr or len(mac_addr) < 16:
@@ -145,7 +153,7 @@ class Config:
                 # TODO: find some way to control the actual startup state?
                 "startup": {"configured": True, "mode": "safety"},
             },
-            "throttle": 0,
+            "throttle": DEFAULT_THROTTLE_MS,
             "manufacturername": "",
             "modelid": "",
             "productname": "",

@@ -136,8 +136,7 @@ class HueApi:
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
 
-        # Create and start the HTTP API on port 80
-        # Port MUST be 80 to maintain compatability with Hue apps
+        # Create and start the HTTP webserver/api
         self.http_site = web.TCPSite(self.runner, port=self.config.http_port)
         try:
             await self.http_site.start()
@@ -157,8 +156,7 @@ class HueApi:
         ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         ssl_context.load_cert_chain(cert_file, key_file)
 
-        # Create and start the HTTPS API on port 443
-        # Port MUST be 443 to maintain compatability with Hue apps
+        # Create and start the HTTPS webserver/API
         self.https_site = web.TCPSite(
             self.runner, port=self.config.https_port, ssl_context=ssl_context
         )
@@ -295,6 +293,8 @@ class HueApi:
         """Handle requests to perform action on a group of lights/room."""
         group_id = request.match_info["group_id"]
         username = request.match_info["username"]
+        # instead of directly getting groups should have a property
+        # get groups instead so we can easily modify it
         group_conf = await self.config.async_get_storage_value("groups", group_id)
         if group_id == "0" and "scene" in request_data:
             # scene request
@@ -312,9 +312,11 @@ class HueApi:
                     await self.__async_light_action(entity, request_data)
         else:
             # forward request to all group lights
+            # may need refactor to make __async_get_group_lights not an
+            # async generator to instead return a dict
             async for entity in self.__async_get_group_lights(group_id):
                 await self.__async_light_action(entity, request_data)
-        if "stream" in group_conf:
+        if group_conf and "stream" in group_conf:
             # Request streaming stop
             # Duplicate code here. Method instead?
             LOGGER.info(
@@ -647,7 +649,7 @@ class HueApi:
         # throttle command to light
         data_with_power = request_data.copy()
         data_with_power[const.HASS_STATE_ON] = power_on
-        if not self.__update_allowed(light_id, data_with_power, throttle_ms):
+        if not self.__update_allowed(entity, data_with_power, throttle_ms):
             return
 
         service = (
@@ -727,17 +729,27 @@ class HueApi:
             await self.hass.async_call_service(const.HASS_DOMAIN_LIGHT, service, data)
 
     def __update_allowed(
-        self, light_id: str, light_data: dict, throttle_ms: int
+        self, entity: dict, light_data: dict, throttle_ms: int
     ) -> bool:
         """Minimalistic form of throttling, only allow updates to a light within a timespan."""
 
-        prev_data = self._prev_data.get(light_id, {})
+        if not throttle_ms:
+            return True
+
+        prev_data = self._prev_data.get(entity["entity_id"], {})
+
+        # pass initial request to light
+        if not prev_data:
+            self._prev_data[entity["entity_id"]] = light_data.copy()
+            return True
 
         # force to update if power state changed
-        if prev_data.get(const.HASS_STATE_ON, True) != light_data.get(
+        if (entity["state"] == const.HASS_STATE_ON) != light_data.get(
             const.HASS_STATE_ON, True
         ):
+            self._prev_data[entity["entity_id"]].update(light_data)
             return True
+
         # check if data changed
         # when not using udp no need to send same light command again
         if (
@@ -751,21 +763,23 @@ class HueApi:
             == light_data.get(const.HUE_ATTR_CT, 0)
             and prev_data.get(const.HUE_ATTR_XY, [0, 0])
             == light_data.get(const.HUE_ATTR_XY, [0, 0])
+            and prev_data.get(const.HUE_ATTR_EFFECT, "none")
+            == light_data.get(const.HUE_ATTR_EFFECT, "none")
+            and prev_data.get(const.HUE_ATTR_ALERT, "none")
+            == light_data.get(const.HUE_ATTR_ALERT, "none")
         ):
             return False
 
-        self._prev_data[light_id] = light_data.copy()
+        self._prev_data[entity["entity_id"]].update(light_data)
 
         # check throttle timestamp so light commands are only sent once every X milliseconds
         # this is to not overload a light implementation in Home Assistant
-        if not throttle_ms:
-            return True
-        prev_timestamp = self._timestamps.get(light_id, 0)
+        prev_timestamp = self._timestamps.get(entity["entity_id"], 0)
         cur_timestamp = int(time.time() * 1000)
         time_diff = abs(cur_timestamp - prev_timestamp)
         if time_diff >= throttle_ms:
             # change allowed only if within throttle limit
-            self._timestamps[light_id] = cur_timestamp
+            self._timestamps[entity["entity_id"]] = cur_timestamp
             return True
         return False
 
@@ -945,7 +959,11 @@ class HueApi:
             item_id = str(i)
             if item_id not in local_items:
                 break
-        if data["type"] in ["LightGroup", "Room", "Zone"] and "class" not in data:
+        if (
+            itemtype == "groups"
+            and data["type"] in ["LightGroup", "Room", "Zone"]
+            and "class" not in data
+        ):
             data["class"] = "Other"
         await self.config.async_set_storage_value(itemtype, item_id, data)
         return item_id
@@ -1006,7 +1024,14 @@ class HueApi:
         self, group_id: str
     ) -> AsyncGenerator[dict, None]:
         """Get all light entities for a group."""
-        group_conf = await self.config.async_get_storage_value("groups", group_id)
+        if group_id == "0":
+            all_lights = await self.__async_get_all_lights()
+            group_conf = {}
+            group_conf["lights"] = []
+            for light_id in all_lights:
+                group_conf["lights"].append(light_id)
+        else:
+            group_conf = await self.config.async_get_storage_value("groups", group_id)
         if not group_conf:
             raise RuntimeError("Invalid group id: %s" % group_id)
 
